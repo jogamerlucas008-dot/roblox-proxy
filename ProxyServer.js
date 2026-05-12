@@ -23,11 +23,28 @@ const fetch   = require("node-fetch");
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ============================================================
-// OPTION A: .ROBLOSECURITY cookie (alt account)
-// Get it from: browser DevTools > Application > Cookies > .ROBLOSECURITY
-// ============================================================
 const ROBLOSECURITY_COOKIE = process.env.ROBLOX_COOKIE || "YOUR_.ROBLOSECURITY_COOKIE_HERE";
+
+// ============================================================
+// CACHE — stores presence data per userId for 2 seconds
+// Prevents 429 rate limits even with 0.1s refresh rate
+// ============================================================
+const cache = new Map();
+const CACHE_TTL_MS = 2000;
+
+function getCached(userId) {
+    const entry = cache.get(userId);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > CACHE_TTL_MS) {
+        cache.delete(userId);
+        return null;
+    }
+    return entry.data;
+}
+
+function setCache(userId, data) {
+    cache.set(userId, { data, timestamp: Date.now() });
+}
 
 // ============================================================
 // GET /presence/:userId
@@ -39,6 +56,10 @@ app.get("/presence/:userId", async (req, res) => {
     if (!userId || isNaN(userId)) {
         return res.status(400).json({ error: "Invalid userId" });
     }
+
+    // Return cached response if fresh enough
+    const cached = getCached(userId);
+    if (cached) return res.json(cached);
 
     try {
         const response = await fetch("https://presence.roblox.com/v1/presence/users", {
@@ -61,13 +82,15 @@ app.get("/presence/:userId", async (req, res) => {
             return res.status(404).json({ error: "No presence data" });
         }
 
-        // Return only what the Roblox game needs
-        return res.json({
-            userPresenceType: presence.userPresenceType,  // 0=Offline,1=Online,2=In-game,3=Studio
+        const result = {
+            userPresenceType: presence.userPresenceType,
             placeId:          presence.placeId   || null,
-            gameId:           presence.gameId    || null, // this is the JobId / server instance ID
+            gameId:           presence.gameId    || null,
             lastLocation:     presence.lastLocation || "",
-        });
+        };
+
+        setCache(userId, result);
+        return res.json(result);
 
     } catch (err) {
         console.error("Proxy error:", err);
