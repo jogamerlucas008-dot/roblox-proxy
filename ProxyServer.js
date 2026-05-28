@@ -6,10 +6,9 @@ const PORT = process.env.PORT || 3000;
 
 const ROBLOSECURITY_COOKIE = process.env.ROBLOX_COOKIE || "YOUR_.ROBLOSECURITY_COOKIE_HERE";
 
-// Cache for presence data
+// Cache
 const cache = new Map();
 const CACHE_TTL_MS = 2000;
-
 function getCached(key) {
     const entry = cache.get(key);
     if (!entry) return null;
@@ -56,14 +55,13 @@ app.get("/presence/:userId", async (req, res) => {
         setCache("presence_" + userId, result);
         return res.json(result);
     } catch (err) {
-        console.error("Proxy error:", err);
+        console.error("Presence error:", err);
         return res.status(500).json({ error: "Internal proxy error" });
     }
 });
 
 // ============================================================
 // GET /resolvelink?code=XXX&placeId=YYY
-// Resolves a private server link or share link to placeId+jobId
 // ============================================================
 app.get("/resolvelink", async (req, res) => {
     const { code, placeId } = req.query;
@@ -74,7 +72,8 @@ app.get("/resolvelink", async (req, res) => {
     if (cached) return res.json(cached);
 
     try {
-        // Try the sharelinks resolve API first (works for invite links)
+        // Attempt 1: sharelinks resolve API (for /share?code= links)
+        console.log("[resolvelink] Trying sharelinks API with code:", code);
         const shareResponse = await fetch("https://apis.roblox.com/sharelinks/v1/resolve", {
             method: "POST",
             headers: {
@@ -87,8 +86,12 @@ app.get("/resolvelink", async (req, res) => {
             }),
         });
 
+        const shareText = await shareResponse.text();
+        console.log("[resolvelink] sharelinks status:", shareResponse.status, "body:", shareText);
+
         if (shareResponse.ok) {
-            const shareData = await shareResponse.json();
+            let shareData;
+            try { shareData = JSON.parse(shareText); } catch(e) {}
             if (shareData && shareData.placeId && shareData.instanceId) {
                 const result = { placeId: shareData.placeId, jobId: shareData.instanceId };
                 setCache(cacheKey, result);
@@ -96,8 +99,9 @@ app.get("/resolvelink", async (req, res) => {
             }
         }
 
-        // Fallback: try private server link (privateServerLinkCode in URL)
+        // Attempt 2: private server link (for ?privateServerLinkCode= links)
         if (placeId) {
+            console.log("[resolvelink] Trying private server API with placeId:", placeId, "code:", code);
             const privateResponse = await fetch("https://gamejoin.roblox.com/v1/join-private-game", {
                 method: "POST",
                 headers: {
@@ -110,21 +114,26 @@ app.get("/resolvelink", async (req, res) => {
                 }),
             });
 
-            const privateData = await privateResponse.json();
+            const privateText = await privateResponse.text();
+            console.log("[resolvelink] private server status:", privateResponse.status, "body:", privateText);
+
+            let privateData;
+            try { privateData = JSON.parse(privateText); } catch(e) {}
+
             if (privateData && privateData.jobId) {
                 const result = { placeId: parseInt(placeId), jobId: privateData.jobId };
                 setCache(cacheKey, result);
                 return res.json(result);
             }
 
-            return res.status(404).json({ error: "Could not resolve link", raw: privateData });
+            return res.status(404).json({ error: "Could not resolve link", shareRaw: shareText, privateRaw: privateText });
         }
 
-        return res.status(404).json({ error: "Could not resolve link" });
+        return res.status(404).json({ error: "Could not resolve link", shareRaw: shareText });
 
     } catch (err) {
         console.error("Resolvelink error:", err);
-        return res.status(500).json({ error: "Internal proxy error" });
+        return res.status(500).json({ error: "Internal proxy error", details: err.message });
     }
 });
 
